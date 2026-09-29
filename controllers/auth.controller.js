@@ -162,13 +162,19 @@ export class AuthController {
    */
   static async getMe(req, res, next) {
     try {
-      const profile = await ProfileModel.getById(req.user.id, req.token);
+      let profile = null;
+      try {
+        profile = await ProfileModel.getById(req.user.id, req.token);
+      } catch (profileErr) {
+        // Fallback gracefully so session stays active even if profiles table hasn't been migrated yet
+      }
+
       return successResponse(res, {
         user: req.user,
         profile: profile || {
           id: req.user.id,
           email: req.user.email,
-          full_name: req.user.user_metadata?.full_name || req.user.email.split('@')[0]
+          full_name: req.user.user_metadata?.full_name || req.user.email?.split('@')[0] || 'User'
         }
       }, 'Current session retrieved');
     } catch (err) {
@@ -176,3 +182,4 @@ export class AuthController {
     }
   }
 }
+
