@@ -1,4 +1,4 @@
-import { supabaseClient } from '../config/supabase.js';
+import { supabaseClient, supabaseAdmin } from '../config/supabase.js';
 import { ProfileModel } from '../models/profile.model.js';
 import { successResponse, errorResponse } from '../utils/responseHandler.js';
 
@@ -19,27 +19,54 @@ export class AuthController {
         return errorResponse(res, 'Password must be at least 6 characters long.', 400);
       }
 
-      if (!supabaseClient) {
+      if (!supabaseClient && !supabaseAdmin) {
         return errorResponse(res, 'Supabase authentication service is not configured.', 503);
       }
 
-      const { data, error } = await supabaseClient.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
+      let user = null;
+      let session = null;
+
+      // Use supabaseAdmin to auto-confirm email so users never get blocked by "Email not confirmed"
+      if (supabaseAdmin) {
+        const { data, error } = await supabaseAdmin.auth.admin.createUser({
+          email,
+          password,
+          email_confirm: true,
+          user_metadata: {
             full_name: fullName || email.split('@')[0]
           }
-        }
-      });
+        });
 
-      if (error) {
-        return errorResponse(res, error.message, 400);
+        if (error) {
+          // If already registered or error, report message
+          return errorResponse(res, error.message, 400);
+        }
+        user = data.user;
+
+        // Automatically sign in to generate a session
+        const loginRes = await supabaseClient.auth.signInWithPassword({ email, password });
+        session = loginRes.data?.session || null;
+      } else {
+        const { data, error } = await supabaseClient.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              full_name: fullName || email.split('@')[0]
+            }
+          }
+        });
+
+        if (error) {
+          return errorResponse(res, error.message, 400);
+        }
+        user = data.user;
+        session = data.session;
       }
 
       return successResponse(res, {
-        user: data.user,
-        session: data.session
+        user,
+        session
       }, 'Registration successful! You can now log in.', 201);
     } catch (err) {
       next(err);
@@ -62,10 +89,30 @@ export class AuthController {
         return errorResponse(res, 'Supabase authentication service is not configured.', 503);
       }
 
-      const { data, error } = await supabaseClient.auth.signInWithPassword({
+      let { data, error } = await supabaseClient.auth.signInWithPassword({
         email,
         password
       });
+
+      // If email is not confirmed, auto-confirm it using supabaseAdmin and retry login!
+      if (error && error.message === 'Email not confirmed' && supabaseAdmin) {
+        try {
+          const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
+          const existing = userList?.users?.find(u => u.email?.toLowerCase() === email.toLowerCase());
+          if (existing) {
+            await supabaseAdmin.auth.admin.updateUserById(existing.id, {
+              email_confirm: true
+            });
+
+            // Retry signing in
+            const retryRes = await supabaseClient.auth.signInWithPassword({ email, password });
+            data = retryRes.data;
+            error = retryRes.error;
+          }
+        } catch (confirmErr) {
+          console.error('Auto-confirm attempt failed:', confirmErr);
+        }
+      }
 
       if (error) {
         return errorResponse(res, error.message, 401);
